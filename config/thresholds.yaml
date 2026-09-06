@@ -1,0 +1,14 @@
+# sysmonitor configuration.
+# Copy to thresholds.local.yaml to override locally without touching version control.
+
+poll_interval_seconds: 5
+top_n_processes: 5
+
+thresholds:
+  cpu_percent: 80
+  memory_percent: 85
+  disk_percent: 90
+
+logging:
+  log_file: logs/sysmonitor.log
+  format: json   # "json" (one object per line) or "text" (human-readable)

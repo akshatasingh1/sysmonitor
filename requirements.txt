@@ -1,0 +1,7 @@
+# Direct dependencies (pinned for reproducible installs).
+# Transitive deps are resolved by pip; see the venv or run `pip freeze` for the full set.
+psutil==7.2.2
+click==8.5.0
+PyYAML==6.0.3
+pydantic==2.13.5
+pytest==9.1.1
