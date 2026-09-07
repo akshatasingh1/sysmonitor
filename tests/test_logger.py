@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 
 from sysmonitor.logger import JsonFormatter, get_logger
@@ -39,6 +40,17 @@ def test_json_formatter_emits_single_line():
     line = JsonFormatter().format(_record(msg="line one\nline two"))
     assert "\n" not in line
     assert json.loads(line)["message"] == "line one\nline two"
+
+
+def test_json_formatter_includes_exception_text():
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        rec = logging.LogRecord(
+            "sysmonitor", logging.ERROR, __file__, 1, "failed", (), sys.exc_info()
+        )
+    obj = json.loads(JsonFormatter().format(rec))
+    assert "ValueError: boom" in obj["exc_info"]
 
 
 def test_json_formatter_events_carry_different_fields():
@@ -91,21 +103,16 @@ def test_get_logger_is_idempotent(tmp_path):
     get_logger(config)
     logger = get_logger(config)
 
-    assert len(logger.handlers) == 2  # not stacked to 4
+    assert len(logger.handlers) == 1  # not stacked to 2
 
 
-def test_get_logger_configures_rotation(tmp_path):
+def test_get_logger_is_file_only(tmp_path):
+    # No console handler: watch prints its own human-readable view, the file
+    # stays machine-parseable.
     logger = get_logger(_config(tmp_path))
-    file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
 
-    assert len(file_handlers) == 1
-    assert file_handlers[0].maxBytes == 5 * 1024 * 1024
-    assert file_handlers[0].backupCount == 3
-
-
-def test_get_logger_has_file_and_console_handlers(tmp_path):
-    logger = get_logger(_config(tmp_path))
-    kinds = {type(h) for h in logger.handlers}
-
-    assert RotatingFileHandler in kinds
-    assert logging.StreamHandler in kinds
+    assert len(logger.handlers) == 1
+    handler = logger.handlers[0]
+    assert isinstance(handler, RotatingFileHandler)
+    assert handler.maxBytes == 5 * 1024 * 1024
+    assert handler.backupCount == 3

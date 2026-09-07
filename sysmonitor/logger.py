@@ -1,7 +1,9 @@
 """Structured logging for sysmonitor.
 
-``get_logger(config)`` returns a logger with two handlers - a rotating file and
-the console - both using the format named in the config (``json`` or ``text``).
+``get_logger(config)`` returns a logger that writes to one rotating **file** in
+the format named in the config (``json`` or ``text``). It does not write to the
+console - ``watch`` prints its own human-readable view there, so the file can
+stay machine-parseable without a wall of JSON scrolling past the operator.
 
 JSON mode emits one object per line: the standard ``time`` / ``level`` /
 ``message`` plus any fields passed through ``extra=`` on the logging call, so
@@ -61,7 +63,7 @@ def _make_formatter(fmt: str) -> logging.Formatter:
 
 
 def get_logger(config: LoggingConfig) -> logging.Logger:
-    """Return the configured ``sysmonitor`` logger. Safe to call more than once."""
+    """Return the configured ``sysmonitor`` file logger. Safe to call repeatedly."""
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -72,8 +74,6 @@ def get_logger(config: LoggingConfig) -> logging.Logger:
         handler.close()
         logger.removeHandler(handler)
 
-    formatter = _make_formatter(config.format)
-
     log_path = Path(config.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -83,11 +83,7 @@ def get_logger(config: LoggingConfig) -> logging.Logger:
         backupCount=_BACKUP_COUNT,
         encoding="utf-8",
     )
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(_make_formatter(config.format))
     logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
 
     return logger

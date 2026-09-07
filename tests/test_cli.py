@@ -102,17 +102,56 @@ def test_snapshot_applies_config_thresholds(mock_snap, runner, tmp_path):
     assert "CPU usage is critically high." in result.output
 
 
-def test_force_utf8_output_survives_stream_without_reconfigure():
-    # objects lacking .reconfigure (or rejecting it) must not raise
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_snapshot_report_warning_branches(mock_snap, runner, tmp_path):
+    yaml_text = CONFIG_YAML.format(log_file=(tmp_path / "s.log").as_posix()).replace(
+        "{ warning: 70, critical: 90 }", "{ warning: 30, critical: 95 }"
+    )
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+    mock_snap.return_value = _snapshot(cpu=50, mem=50, disk=50)  # all WARNING
+
+    result = runner.invoke(cli, ["snapshot", "--config", str(path)])
+
+    assert result.exit_code == 0
+    assert "CPU usage is high." in result.output
+    assert "Memory usage is high." in result.output
+    assert "Disk space is getting low." in result.output
+    # all three recommendation lines rendered
+    assert result.output.count("→ ") == 3
+
+
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_snapshot_report_critical_branches(mock_snap, runner, tmp_path):
+    yaml_text = CONFIG_YAML.format(log_file=(tmp_path / "s.log").as_posix()).replace(
+        "{ warning: 70, critical: 90 }", "{ warning: 10, critical: 30 }"
+    )
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+    mock_snap.return_value = _snapshot(cpu=50, mem=50, disk=50)  # all CRITICAL
+
+    result = runner.invoke(cli, ["snapshot", "--config", str(path)])
+
+    assert result.exit_code == 0
+    assert "CPU usage is critically high." in result.output
+    assert "Memory usage is critically high." in result.output
+    assert "Disk space is critically low." in result.output
+
+
+def test_force_utf8_output_tolerates_missing_or_failing_reconfigure():
     from sysmonitor.cli import _force_utf8_output
 
-    class Dumb:
+    class NoReconfigure:
         pass
 
-    with patch("sysmonitor.cli.sys.stdout", Dumb()), patch(
-        "sysmonitor.cli.sys.stderr", Dumb()
+    class FailingReconfigure:
+        def reconfigure(self, **_):
+            raise OSError("cannot reconfigure a redirected pipe")
+
+    with patch("sysmonitor.cli.sys.stdout", NoReconfigure()), patch(
+        "sysmonitor.cli.sys.stderr", FailingReconfigure()
     ):
-        _force_utf8_output()  # no exception
+        _force_utf8_output()  # neither path raises
 
 
 def test_snapshot_missing_config_fails_cleanly(runner, tmp_path):
@@ -196,6 +235,22 @@ def test_watch_once_all_normal_logs_no_breach(mock_snap, mock_sleep, runner, con
     assert result.exit_code == 0
     events = config_file.log_events()
     assert [e["event"] for e in events] == ["snapshot"]
+
+
+@patch("sysmonitor.cli.time.sleep")
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_watch_prints_human_status_line(mock_snap, mock_sleep, runner, config_file):
+    mock_snap.return_value = _snapshot(cpu=12.3, mem=45.6, disk=28.7)
+
+    result = runner.invoke(cli, ["watch", "--once", "--config", config_file.path])
+
+    # a readable line on the console, not JSON
+    assert "CPU  12.3% NORMAL" in result.output
+    assert "MEM  45.6% NORMAL" in result.output
+    assert "DISK  28.7% NORMAL" in result.output
+    assert "{" not in result.output  # the JSON went to the file, not the console
+    # ...and the file still got the structured record
+    assert config_file.log_events()[0]["event"] == "snapshot"
 
 
 @patch("sysmonitor.cli.get_system_snapshot")

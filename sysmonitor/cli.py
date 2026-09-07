@@ -6,15 +6,17 @@ Three commands, all sharing a ``--config`` option:
 * ``top``      - just the top-N process table.
 * ``watch``    - poll on an interval, logging each cycle, until interrupted.
 
-``watch`` logs every cycle at INFO and, debounced, every state change at
-WARNING/INFO through :func:`sysmonitor.logger.get_logger`. On a transition *into*
-a CPU or memory breach it also attaches the top-N processes (sorted by the
-breached metric) so the log says what was responsible, not just that something
-was wrong.
+``watch`` writes a structured record for every cycle (INFO) and every debounced
+state change (WARNING/INFO) to the log *file* via
+:func:`sysmonitor.logger.get_logger`, and separately prints a human-readable
+status line to the console each cycle. On a transition *into* a CPU or memory
+breach it attaches the top-N processes (sorted by the breached metric) so the
+log says what was responsible, not just that something was wrong.
 """
 
 import sys
 import time
+from datetime import datetime, timezone
 
 import click
 
@@ -221,6 +223,7 @@ def _watch_cycle(config, logger, previous_states):
             "net_recv_bytes": snap.net_recv_bytes,
         },
     )
+    _echo_status_line(snap, states)
 
     # Debounce: only react to a metric whose state changed since last cycle,
     # not to an ongoing breach every single poll.
@@ -228,6 +231,23 @@ def _watch_cycle(config, logger, previous_states):
         _report_transition(logger, config, transition, values[transition.metric])
 
     return states
+
+
+def _echo_status_line(snap, states):
+    """One aligned, human-readable line per cycle - the live view on the console."""
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%SZ")
+    line = (
+        f"{stamp}   "
+        f"CPU {snap.cpu_percent:5.1f}% {_state_word(states['cpu']):<8} "
+        f"MEM {snap.memory_percent:5.1f}% {_state_word(states['memory']):<8} "
+        f"DISK {snap.disk_percent:5.1f}% {_state_word(states['disk']):<8}"
+    )
+    if CRITICAL in states.values():
+        click.secho(line, fg="red")
+    elif WARNING in states.values():
+        click.secho(line, fg="yellow")
+    else:
+        click.echo(line)
 
 
 # psutil exposes per-process CPU and memory cheaply, but not per-process disk -

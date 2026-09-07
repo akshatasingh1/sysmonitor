@@ -1,35 +1,46 @@
-# System Diagnostic Report
+# sysmonitor
 
-A Python-based system diagnostic tool that monitors CPU, RAM, and disk usage and provides recommendations for potential performance issues.
+A terminal tool for monitoring system and per-process resource usage.
 
-## 📋 Description
+## 📋 What it does
 
-System Diagnostic Report is a Python program that checks the current system resource usage and generates a diagnostic report. The program checks CPU usage, RAM usage, and disk usage using the `psutil` library.
+You run it as `sysmonitor watch`. It polls system and per-process
+CPU / memory / disk / network stats on an interval, checks them against
+warning/critical thresholds from a YAML file, writes structured logs, and fires
+a debounced alert when a metric crosses a limit. There's also `sysmonitor
+snapshot` for a one-off formatted report and `sysmonitor top` for the top-N
+process table. No GUI, no web server, no plugins.
 
-I made this project because I wanted to build something practical that uses Python to interact with the computer instead of just taking input and producing an output. The program gets the current CPU, RAM, and disk usage and then checks whether each resource is in a normal, warning, or critical state.
+It started as a one-shot diagnostic script and grew into a small monitoring CLI —
+the kind of internal tool you'd leave running unattended.
 
-### Resource Status Levels
+### Resource status levels
 
-| Level        | Threshold     | Icon |
-| :----------- | :------------ | :--: |
-| **NORMAL**   | Below 70%     |   ✓  |
-| **WARNING**  | 70% – 89%     |   ⚠  |
-| **CRITICAL** | 90% and above |   ✗  |
+Each metric is classified `NORMAL` / `WARNING` / `CRITICAL` against two
+per-resource cut-offs. The defaults are 70 and 90; both come from
+[`config/thresholds.yaml`](config/thresholds.yaml) and can be set per resource.
+
+| Level        | Default range        | Icon |
+| :----------- | :------------------- | :--: |
+| **NORMAL**   | below `warning`      |   ✓  |
+| **WARNING**  | `warning`–`critical` |   ⚠  |
+| **CRITICAL** | at/above `critical`  |   ✗  |
 
 ## 🚀 Features
 
-* 📊 Monitors CPU, RAM, and disk usage
-* ⚠️ Identifies the current status of each resource
-* 💡 Provides recommendations for resources with high usage
-* 🔍 Generates an overall assessment of system performance
-* 🧪 Includes automated tests using `pytest`
-* 📋 Displays a formatted diagnostic report in the terminal
-* 🔧 Uses separate functions for system statistics, analysis, recommendations, and reporting
+* 📊 **`watch`** — polls CPU / memory / disk / network on an interval and logs every cycle
+* 🎯 **Two-tier thresholds** — `warning` and `critical` per resource, from validated YAML config
+* 🔔 **Debounced alerts** — alerts only on a state *change*, not every cycle a breach is ongoing; logs a recovery when it clears
+* 🔍 **Top processes on breach** — on a CPU/memory breach, attaches the top-N offending processes to the log
+* 📝 **Structured logging** — `json` (one object per line, per-event fields) or `text`, to a rotating file and the console
+* 📋 **`snapshot`** — a one-off formatted report with per-resource recommendations and an overall assessment
+* 📈 **`top`** — top-N processes by CPU or memory, as a fixed-width table
+* 🧪 **Tested** — `pytest` at 100% coverage, `psutil` mocked so tests don't depend on the host
 
 ## 📁 Project Structure
 
 ```text
-system-diagnostic-report/
+sysmonitor/
 ├── sysmonitor/                  # Package
 │   ├── __init__.py
 │   ├── cli.py                   # click CLI: snapshot / top / watch
@@ -42,7 +53,12 @@ system-diagnostic-report/
 │   ├── thresholds.yaml         # default config
 │   └── thresholds.example.yaml # committed reference copy
 ├── tests/
-│   └── test_alerts.py          # unit tests for the pure logic
+│   ├── conftest.py             # shared fixtures / logger cleanup
+│   ├── test_alerts.py          # analysis + debounce logic
+│   ├── test_collector.py       # collector with psutil mocked
+│   ├── test_config.py          # config loading + failure modes
+│   ├── test_logger.py          # formatters + handler setup
+│   └── test_cli.py             # all three commands via CliRunner
 ├── logs/                        # rotating log output (gitignored)
 ├── pyproject.toml               # package metadata + `sysmonitor` entry point
 ├── requirements.txt             # pinned direct dependencies
@@ -56,8 +72,8 @@ system-diagnostic-report/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/system-diagnostic-report.git
-cd system-diagnostic-report
+git clone https://github.com/akshatasingh1/sysmonitor.git
+cd sysmonitor
 ```
 
 ### 2. Set up the environment
@@ -135,34 +151,48 @@ Disk      82%     ⚠ WARNING
 
 ### `watch` — example output
 
-`watch` logs each cycle through Python's `logging` module — to a rotating file
-*and* the console — in the format set by `logging.format`.
-
-`format: json` (one object per line, for `jq` / log aggregators):
+The **console** shows one aligned status line per cycle (yellow if anything is
+WARNING, red if CRITICAL), plus a `BREACH` / `RECOVERED` block when a state
+changes:
 
 ```text
 Monitoring every 5s (Ctrl+C to stop). Logging to logs/sysmonitor.log.
-{"time": "2026-09-07T04:37:53.680999+00:00", "level": "INFO", "message": "snapshot cpu=3.5% mem=71.2% disk=28.6%", "event": "snapshot", "cpu_percent": 3.5, "memory_percent": 71.2, "disk_percent": 28.6, "cpu_state": "NORMAL", "memory_state": "WARNING", "disk_state": "NORMAL", "net_sent_bytes": 16554323, "net_recv_bytes": 142378209}
-{"time": "2026-09-07T04:37:53.680999+00:00", "level": "WARNING", "message": "memory at 71.2% is WARNING", "event": "threshold_breach", "metric": "memory", "value": 71.2, "state": "WARNING"}
+05:16:15Z   CPU   5.3% NORMAL   MEM  68.3% NORMAL   DISK  28.7% NORMAL
+05:16:20Z   CPU  85.0% WARNING  MEM  68.3% NORMAL   DISK  28.7% NORMAL
+  BREACH  cpu at 85.0% is WARNING (was NORMAL)
+        22924  python.exe                    cpu  90.9%  mem   0.2%
+        11472  Code.exe                      cpu  49.2%  mem   2.6%
+         1968  dwm.exe                       cpu  13.3%  mem   1.0%
+05:16:25Z   CPU  88.0% WARNING  MEM  68.3% NORMAL   DISK  28.7% NORMAL
 ^C
 Stopped monitoring.
 ```
 
-`format: text` (human-readable):
+The **log file** gets a structured record for every cycle and every state change,
+in the format from `logging.format`:
+
+`json` (one object per line, for `jq` / log aggregators):
 
 ```text
-2026-09-07T04:37:53Z [INFO] snapshot cpu=3.5% mem=71.2% disk=28.6%
-2026-09-07T04:37:53Z [WARNING] memory at 71.2% is WARNING (was NORMAL)
+{"time": "2026-09-07T05:16:15.680999+00:00", "level": "INFO", "message": "snapshot cpu=5.3% mem=68.3% disk=28.7%", "event": "snapshot", "cpu_percent": 5.3, "memory_percent": 68.3, "disk_percent": 28.7, "cpu_state": "NORMAL", "memory_state": "NORMAL", "disk_state": "NORMAL", "net_sent_bytes": 16554323, "net_recv_bytes": 142378209}
+{"time": "2026-09-07T05:16:20.681000+00:00", "level": "WARNING", "message": "cpu at 85.0% is WARNING (was NORMAL)", "event": "threshold_breach", "metric": "cpu", "value": 85.0, "state": "WARNING", "previous_state": "NORMAL", "top_processes": [{"pid": 22924, "name": "python.exe", "cpu_percent": 90.9, "memory_percent": 0.2}]}
 ```
 
-**Debounced alerts.** `watch` only alerts when a metric's state *changes*, not
+`text`:
+
+```text
+2026-09-07T05:16:15Z [INFO] snapshot cpu=5.3% mem=68.3% disk=28.7%
+2026-09-07T05:16:20Z [WARNING] cpu at 85.0% is WARNING (was NORMAL)
+```
+
+**Debounced alerts.** `watch` only reacts when a metric's state *changes*, not
 every cycle a breach is ongoing:
 
 ```text
-cycle 1   cpu 75%  NORMAL   -> WARNING    [WARNING] cpu ... is WARNING (was NORMAL)
-cycle 2   cpu 80%  WARNING  -> WARNING    (no alert - unchanged)
-cycle 3   cpu 95%  WARNING  -> CRITICAL   [WARNING] cpu ... is CRITICAL (was WARNING)
-cycle 4   cpu 10%  CRITICAL -> NORMAL     [INFO]    cpu recovered to NORMAL (was CRITICAL)
+cycle 1   cpu 75%  NORMAL   -> WARNING    breach   (top processes attached)
+cycle 2   cpu 80%  WARNING  -> WARNING    nothing  (unchanged)
+cycle 3   cpu 95%  WARNING  -> CRITICAL   breach   (escalation, re-scanned)
+cycle 4   cpu 10%  CRITICAL -> NORMAL     recovery (threshold_cleared, no scan)
 ```
 
 Every cycle still logs its `snapshot` at INFO; only the breach/recovery events
@@ -219,29 +249,35 @@ a substitute for the config file.)
 
 ### Logging
 
-`watch` logs via Python's `logging` module (`sysmonitor/logger.py`):
+`watch` splits the live view from the log (`sysmonitor/logger.py`):
 
+* **Console** — `watch` prints its own aligned, human-readable status line each
+  cycle. The logger does *not* write to the console, so switching the file to
+  `json` never turns the terminal into a wall of JSON.
 * **Rotating file** — `RotatingFileHandler`, 5 MB per file, 3 backups, so an
   unattended run doesn't grow the log without bound.
-* **Console** too — same format as the file.
 * **`json` format** emits one object per line. Standard `time` / `level` /
   `message` plus per-event structured fields passed via `extra=` — a `snapshot`
   event carries the metric values and states; a `threshold_breach` event carries
-  `metric` / `value` / `state`. Each event carries only the fields relevant to
-  it rather than a fixed schema.
+  `metric` / `value` / `state` / `previous_state` (and `top_processes` for a
+  CPU/memory breach). Each event carries only the fields relevant to it.
 * **`text` format** is deliberately plain (`time [LEVEL] message`, UTC) and
   ignores the structured fields — use `json` when you need them.
 * Every cycle logs at `INFO`; every threshold breach logs at `WARNING`.
 
 ## 🧪 Testing
 
-The project uses `pytest` to test the main functions.
-
-Run the tests with:
+`pytest` with `pytest-cov`. Every run prints a coverage report (`--cov` is in
+`addopts`); the full suite is at **100%** line + branch coverage.
 
 ```bash
-pytest
+pytest                      # run tests + coverage report
+pytest --cov-fail-under=100  # the gate CI would use
 ```
+
+External state is never touched: `psutil` is mocked in the collector tests, the
+CLI is driven through click's `CliRunner`, and config/log files are written under
+`tmp_path`.
 
 ### Tested Modules
 
@@ -275,7 +311,7 @@ The test suite covers:
 ### Current Test Result
 
 ```text
-66 passed
+69 passed — 100% coverage
 ```
 
 ## 🛠️ Design Choices
@@ -309,6 +345,11 @@ something downstream would have to regex apart. A custom `Formatter` lifts
 anything passed via `extra=` into the object; text mode stays intentionally dumb.
 `RotatingFileHandler` (5 MB × 3) keeps an unattended run bounded.
 
+**Live view ≠ the log.** The logger writes only to the file. `watch` renders its
+own console output — an aligned per-cycle status line, coloured by severity —
+rather than piping the log format to the terminal. That's what lets the file be
+`json` for machines without the operator staring at raw objects.
+
 **Debounce as pure logic.** `detect_transitions(previous, current)` compares two
 dicts of `metric → state` and returns a `StateTransition` for each change —
 nothing more. The `watch` loop owns the one piece of mutable state (last cycle's
@@ -335,7 +376,7 @@ scannable in the terminal report (structured logs use the bare words).
 * `click` — CLI framework
 * `PyYAML` — config parsing
 * `pydantic` — config validation
-* `pytest` — tests (dev only)
+* `pytest`, `pytest-cov` — tests + coverage (dev only)
 
 Install the required libraries with:
 

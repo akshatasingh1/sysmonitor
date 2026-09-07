@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1"]
+dev = ["pytest==9.1.1", "pytest-cov==7.1.0"]
 
 [project.scripts]
 sysmonitor = "sysmonitor.cli:cli"
@@ -26,3 +26,15 @@ packages = ["sysmonitor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Coverage is reported on every run; the 100% gate lives on the full suite only
+# (e.g. CI: `pytest --cov-fail-under=100`) so running a subset locally is fine.
+addopts = "--cov=sysmonitor --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]
