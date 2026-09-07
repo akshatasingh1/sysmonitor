@@ -36,7 +36,7 @@ system-diagnostic-report/
 │   ├── collector.py            # psutil access — the only module that touches it
 │   ├── alerts.py               # pure analysis / assessment / recommendation logic
 │   ├── config.py               # YAML + pydantic config loading
-│   ├── logger.py               # structured logging setup (Phase 4)
+│   ├── logger.py               # structured logging: rotating file + console
 │   └── models.py               # pydantic data models
 ├── config/
 │   ├── thresholds.yaml         # default config
@@ -135,19 +135,39 @@ Disk      82%     ⚠ WARNING
 
 ### `watch` — example output
 
+`watch` logs each cycle through Python's `logging` module — to a rotating file
+*and* the console — in the format set by `logging.format`.
+
+`format: json` (one object per line, for `jq` / log aggregators):
+
 ```text
-Monitoring every 5s (Ctrl+C to stop).
-2026-09-07T04:10:53Z   CPU   6.0% ✓ NORMAL   RAM  75.9% ⚠ WARNING   Disk  28.6% ✓ NORMAL
-  ⚠ WARNING  RAM at 75.9%
-2026-09-07T04:10:58Z   CPU  11.2% ✓ NORMAL   RAM  74.1% ⚠ WARNING   Disk  28.6% ✓ NORMAL
-  ⚠ WARNING  RAM at 74.1%
+Monitoring every 5s (Ctrl+C to stop). Logging to logs/sysmonitor.log.
+{"time": "2026-09-07T04:37:53.680999+00:00", "level": "INFO", "message": "snapshot cpu=3.5% mem=71.2% disk=28.6%", "event": "snapshot", "cpu_percent": 3.5, "memory_percent": 71.2, "disk_percent": 28.6, "cpu_state": "NORMAL", "memory_state": "WARNING", "disk_state": "NORMAL", "net_sent_bytes": 16554323, "net_recv_bytes": 142378209}
+{"time": "2026-09-07T04:37:53.680999+00:00", "level": "WARNING", "message": "memory at 71.2% is WARNING", "event": "threshold_breach", "metric": "memory", "value": 71.2, "state": "WARNING"}
 ^C
 Stopped monitoring.
 ```
 
-> Structured file logging (`logs/sysmonitor.log`) and alert debouncing land in
-> the next phases; today `watch` prints to the console and re-reports an ongoing
-> breach every cycle.
+`format: text` (human-readable):
+
+```text
+2026-09-07T04:37:53Z [INFO] snapshot cpu=3.5% mem=71.2% disk=28.6%
+2026-09-07T04:37:53Z [WARNING] memory at 71.2% is WARNING (was NORMAL)
+```
+
+**Debounced alerts.** `watch` only alerts when a metric's state *changes*, not
+every cycle a breach is ongoing:
+
+```text
+cycle 1   cpu 75%  NORMAL   -> WARNING    [WARNING] cpu ... is WARNING (was NORMAL)
+cycle 2   cpu 80%  WARNING  -> WARNING    (no alert - unchanged)
+cycle 3   cpu 95%  WARNING  -> CRITICAL   [WARNING] cpu ... is CRITICAL (was WARNING)
+cycle 4   cpu 10%  CRITICAL -> NORMAL     [INFO]    cpu recovered to NORMAL (was CRITICAL)
+```
+
+Every cycle still logs its `snapshot` at INFO; only the breach/recovery events
+are debounced. Breaches log `threshold_breach` at WARNING (red on the console),
+recoveries log `threshold_cleared` at INFO (green).
 
 ## ⚙️ Configuration
 
@@ -181,6 +201,22 @@ is treated as a mistake worth stopping for. (The `analyze_performance` logic
 still carries internal 70/90 defaults, but those are a code-level fallback, not
 a substitute for the config file.)
 
+### Logging
+
+`watch` logs via Python's `logging` module (`sysmonitor/logger.py`):
+
+* **Rotating file** — `RotatingFileHandler`, 5 MB per file, 3 backups, so an
+  unattended run doesn't grow the log without bound.
+* **Console** too — same format as the file.
+* **`json` format** emits one object per line. Standard `time` / `level` /
+  `message` plus per-event structured fields passed via `extra=` — a `snapshot`
+  event carries the metric values and states; a `threshold_breach` event carries
+  `metric` / `value` / `state`. Each event carries only the fields relevant to
+  it rather than a fixed schema.
+* **`text` format** is deliberately plain (`time [LEVEL] message`, UTC) and
+  ignores the structured fields — use `json` when you need them.
+* Every cycle logs at `INFO`; every threshold breach logs at `WARNING`.
+
 ## 🧪 Testing
 
 The project uses `pytest` to test the main functions.
@@ -193,9 +229,10 @@ pytest
 
 ### Tested Modules
 
-* `alerts` — `analyzer()`, `analyze_performance()`, `overall_assessment()`, `generate_recommendations()`
+* `alerts` — `analyzer()`, `analyze_performance()`, `overall_assessment()`, `generate_recommendations()`, `detect_transitions()`
 * `collector` — `get_system_snapshot()`, `get_top_processes()` (with `psutil` mocked)
 * `config` — `load_config()` against valid and malformed YAML
+* `logger` — JSON/text formatters, rotation config, idempotent setup
 * `cli` — `snapshot` / `top` / `watch` via click's `CliRunner` (collector mocked)
 
 ### Test Scenarios
@@ -212,11 +249,15 @@ The test suite covers:
   out-of-range threshold, `warning` ≥ `critical`, unknown key
 * CLI: each subcommand runs, `--config` errors print cleanly (no traceback),
   `--n` overrides config, `watch --once` runs one cycle, Ctrl+C exits cleanly
+* Logging: JSON formatter carries `extra=` fields, text formatter drops them,
+  rotation is configured, `watch` writes `snapshot` + `threshold_breach` events
+* Debounce: no alert while a state is unchanged; re-alert on escalation;
+  `threshold_cleared` on recovery; first cycle only alerts if it starts breached
 
 ### Current Test Result
 
 ```text
-44 passed
+62 passed
 ```
 
 ## 🛠️ Design Choices
@@ -243,9 +284,24 @@ of the raw numbers rather than emitting a flat "over threshold" message.
 traceback or a silent fallback. "What's the failure mode?" should have a
 deliberate answer.
 
+**JSON logs with per-event structured fields.** The reason to pick JSON logging
+over text is machine-parseability — so the fields live *as fields*
+(`{"metric": "cpu", "value": 92.3, ...}`), not baked into a message string that
+something downstream would have to regex apart. A custom `Formatter` lifts
+anything passed via `extra=` into the object; text mode stays intentionally dumb.
+`RotatingFileHandler` (5 MB × 3) keeps an unattended run bounded.
+
+**Debounce as pure logic.** `detect_transitions(previous, current)` compares two
+dicts of `metric → state` and returns a `StateTransition` for each change —
+nothing more. The `watch` loop owns the one piece of mutable state (last cycle's
+states) and does all the formatting. Same split as `analyze_performance`: pure
+decision in `alerts.py`, I/O and state in the loop that drives it. A tool that
+re-fires the same alert every 5 seconds is worse than useless in a real
+workflow.
+
 **`psutil` and Unicode status markers.** `psutil` gives cross-platform access to
 CPU / memory / disk / network from Python; `✓ ⚠ ✗` make the three states
-scannable in a terminal.
+scannable in the terminal report (structured logs use the bare words).
 
 ## 📄 Requirements
 

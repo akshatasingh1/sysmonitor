@@ -1,12 +1,19 @@
 """Resource analysis and alerting logic.
 
 Every function here is pure: it takes values in, returns values out, does no I/O
-and no logging. That is what makes this module trivially unit-testable.
+and no logging. That is what makes this module trivially unit-testable. The
+``watch`` loop owns the mutable state (the previous cycle's states); this module
+just compares two snapshots of it.
 """
+
+from dataclasses import dataclass
 
 NORMAL = "✓ NORMAL"
 WARNING = "⚠ WARNING"
 CRITICAL = "✗ CRITICAL"
+
+# Severity ordering, for classifying a transition as escalation vs improvement.
+_SEVERITY = {NORMAL: 0, WARNING: 1, CRITICAL: 2}
 
 
 # Fallback cut-offs used when no config-driven thresholds are supplied. These
@@ -110,3 +117,49 @@ def generate_disk_recommendations(disk_performance):
         return "Disk space is getting low. Consider removing unnecessary files or uninstalling unused applications."
     elif disk_performance == CRITICAL:
         return "Disk space is critically low. Free up storage by removing unnecessary files and applications."
+
+
+# ------------------------------------------------------------------
+# Alert debounce: only react when a metric's state actually changes
+# ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StateTransition:
+    """One metric moving between severity states from one poll cycle to the next.
+
+    Carries only the facts. Turning this into a log line or a coloured console
+    message is the ``watch`` loop's job, not this module's.
+    """
+
+    metric: str  # "cpu" | "memory" | "disk"
+    previous: str  # NORMAL | WARNING | CRITICAL
+    current: str
+
+    @property
+    def is_escalation(self) -> bool:
+        """True when the metric got worse (e.g. WARNING -> CRITICAL)."""
+        return _SEVERITY[self.current] > _SEVERITY[self.previous]
+
+    @property
+    def is_recovery(self) -> bool:
+        """True when the metric returned all the way to NORMAL."""
+        return self.current == NORMAL and self.previous != NORMAL
+
+
+def detect_transitions(
+    previous: dict[str, str], current: dict[str, str]
+) -> list[StateTransition]:
+    """Return a transition for each metric whose state differs from last cycle.
+
+    A metric missing from ``previous`` is treated as having been ``NORMAL``, so
+    the first cycle only produces a transition for a metric that starts breached.
+    """
+    transitions = []
+    for metric, current_state in current.items():
+        previous_state = previous.get(metric, NORMAL)
+        if current_state != previous_state:
+            transitions.append(
+                StateTransition(metric, previous_state, current_state)
+            )
+    return transitions

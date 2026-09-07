@@ -4,14 +4,15 @@ Three commands, all sharing a ``--config`` option:
 
 * ``snapshot`` - one reading, formatted report, exit.
 * ``top``      - just the top-N process table.
-* ``watch``    - poll on an interval until interrupted.
+* ``watch``    - poll on an interval, logging each cycle, until interrupted.
 
-The structured logging inside ``watch`` (Phase 4) and the alert debounce
-(Phase 5) are marked with TODOs below; today ``watch`` prints to the console.
+``watch`` logs every cycle at INFO and every threshold breach at WARNING through
+:func:`sysmonitor.logger.get_logger`. The alert debounce (Phase 5) - only
+alerting on an OK -> breached transition - is still a TODO below.
 """
 
+import sys
 import time
-from datetime import datetime, timezone
 
 import click
 
@@ -20,11 +21,13 @@ from sysmonitor.alerts import (
     NORMAL,
     WARNING,
     analyze_performance,
+    detect_transitions,
     generate_recommendations,
     overall_assessment,
 )
 from sysmonitor.collector import get_system_snapshot, get_top_processes
 from sysmonitor.config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from sysmonitor.logger import get_logger
 
 
 def config_option(func):
@@ -47,10 +50,26 @@ def _load(config_path):
         raise click.ClickException(str(exc)) from exc
 
 
+def _force_utf8_output():
+    """Make stdout/stderr UTF-8 so the status symbols survive a pipe on Windows.
+
+    Without this, printing '✓ ⚠ ✗' or the report's box-drawing characters to a
+    redirected stream raises UnicodeEncodeError under the Windows cp1252 default.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
+
 @click.group()
 @click.version_option(package_name="sysmonitor")
 def cli():
     """sysmonitor - system and per-process resource monitoring."""
+    _force_utf8_output()
 
 
 # ------------------------------------------------------------------
@@ -142,18 +161,21 @@ def _print_process_table(processes):
 @click.option("--once", is_flag=True, help="Run a single cycle and exit.")
 @config_option
 def watch(once, config_path):
-    """Poll the system on an interval, printing status and threshold breaches."""
+    """Poll the system on an interval, logging each cycle and any breaches."""
     config = _load(config_path)
     interval = config.poll_interval_seconds
+    logger = get_logger(config.logging)
 
     click.echo(
         f"Monitoring every {interval:g}s "
-        f"(Ctrl+C to stop){' - single cycle' if once else ''}."
+        f"(Ctrl+C to stop){' - single cycle' if once else ''}. "
+        f"Logging to {config.logging.log_file}."
     )
 
+    previous_states: dict[str, str] = {}
     try:
         while True:
-            _watch_cycle(config)
+            previous_states = _watch_cycle(config, logger, previous_states)
             if once:
                 break
             time.sleep(interval)
@@ -161,38 +183,89 @@ def watch(once, config_path):
         click.echo("\nStopped monitoring.")
 
 
-def _watch_cycle(config):
+def _state_word(state: str) -> str:
+    """'✓ NORMAL' -> 'NORMAL' - drop the display symbol for structured output."""
+    return state.rsplit(" ", 1)[-1]
+
+
+def _watch_cycle(config, logger, previous_states):
+    """Run one poll cycle. Returns this cycle's states for the next call."""
     snap = get_system_snapshot()
-    cpu_performance, ram_performance, disk_performance = analyze_performance(
+    cpu_state, memory_state, disk_state = analyze_performance(
         snap.cpu_percent,
         snap.memory_percent,
         snap.disk_percent,
         thresholds=config.thresholds,
     )
+    states = {"cpu": cpu_state, "memory": memory_state, "disk": disk_state}
+    values = {
+        "cpu": snap.cpu_percent,
+        "memory": snap.memory_percent,
+        "disk": snap.disk_percent,
+    }
 
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    click.echo(
-        f"{stamp}   "
-        f"CPU {snap.cpu_percent:5.1f}% {cpu_performance}   "
-        f"RAM {snap.memory_percent:5.1f}% {ram_performance}   "
-        f"Disk {snap.disk_percent:5.1f}% {disk_performance}"
+    logger.info(
+        "snapshot cpu=%.1f%% mem=%.1f%% disk=%.1f%%"
+        % (snap.cpu_percent, snap.memory_percent, snap.disk_percent),
+        extra={
+            "event": "snapshot",
+            "cpu_percent": snap.cpu_percent,
+            "memory_percent": snap.memory_percent,
+            "disk_percent": snap.disk_percent,
+            "cpu_state": _state_word(cpu_state),
+            "memory_state": _state_word(memory_state),
+            "disk_state": _state_word(disk_state),
+            "net_sent_bytes": snap.net_sent_bytes,
+            "net_recv_bytes": snap.net_recv_bytes,
+        },
     )
 
-    # TODO(Phase 4): write a structured (json/text) log record for this cycle.
-    # TODO(Phase 5): debounce - only alert on an OK -> breached transition
-    #                instead of every cycle a breach is ongoing.
-    readings = (
-        ("CPU", snap.cpu_percent, cpu_performance),
-        ("RAM", snap.memory_percent, ram_performance),
-        ("Disk", snap.disk_percent, disk_performance),
-    )
-    for label, value, status in readings:
-        if status != NORMAL:
-            click.secho(f"  {status}  {label} at {value:.1f}%", fg="red")
+    # Debounce: only react to a metric whose state changed since last cycle,
+    # not to an ongoing breach every single poll.
+    for transition in detect_transitions(previous_states, states):
+        _report_transition(logger, transition, values[transition.metric])
+
+    return states
+
+
+def _report_transition(logger, transition, value):
+    metric = transition.metric
+    current = _state_word(transition.current)
+    previous = _state_word(transition.previous)
+
+    if transition.current == NORMAL:
+        logger.info(
+            "%s recovered to NORMAL (was %s)" % (metric, previous),
+            extra={
+                "event": "threshold_cleared",
+                "metric": metric,
+                "value": value,
+                "state": current,
+                "previous_state": previous,
+            },
+        )
+        click.secho(
+            f"  RECOVERED  {metric} at {value:.1f}% (was {previous})", fg="green"
+        )
+    else:
+        logger.warning(
+            "%s at %.1f%% is %s (was %s)" % (metric, value, current, previous),
+            extra={
+                "event": "threshold_breach",
+                "metric": metric,
+                "value": value,
+                "state": current,
+                "previous_state": previous,
+            },
+        )
+        click.secho(
+            f"  BREACH  {metric} at {value:.1f}% is {current} (was {previous})",
+            fg="red",
+        )
 
 
 # ------------------------------------------------------------------
-# report rendering (moves to the logging layer in Phase 4)
+# snapshot report rendering (human-facing; watch uses the logger instead)
 # ------------------------------------------------------------------
 
 

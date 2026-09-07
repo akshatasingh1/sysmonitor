@@ -1,6 +1,13 @@
+import pytest
+
 from sysmonitor.alerts import (
+    CRITICAL,
+    NORMAL,
+    WARNING,
+    StateTransition,
     analyze_performance,
     analyzer,
+    detect_transitions,
     generate_recommendations,
     overall_assessment,
 )
@@ -234,3 +241,52 @@ def test_generate_recommendations_mixed():
     assert cpu_recommendation == "CPU usage is critically high. Close resource-intensive applications and check for processes consuming excessive CPU."
     assert ram_recommendation == "Memory usage is high. Close unnecessary applications and browser tabs to free up RAM."
     assert disk_recommendation is None
+
+
+# ============================================================
+# TESTS FOR detect_transitions() - the debounce
+# ============================================================
+
+def test_no_transition_when_state_unchanged():
+    previous = {"cpu": WARNING, "memory": NORMAL, "disk": NORMAL}
+    current = {"cpu": WARNING, "memory": NORMAL, "disk": NORMAL}
+    assert detect_transitions(previous, current) == []
+
+
+def test_first_cycle_normal_is_not_a_transition():
+    # empty previous -> every metric was implicitly NORMAL
+    current = {"cpu": NORMAL, "memory": NORMAL, "disk": NORMAL}
+    assert detect_transitions({}, current) == []
+
+
+def test_first_cycle_breached_is_a_transition_from_normal():
+    current = {"cpu": WARNING, "memory": NORMAL, "disk": NORMAL}
+    result = detect_transitions({}, current)
+    assert result == [StateTransition("cpu", NORMAL, WARNING)]
+
+
+def test_escalation_and_recovery_flags():
+    escalation = detect_transitions({"cpu": WARNING}, {"cpu": CRITICAL})[0]
+    assert escalation.is_escalation and not escalation.is_recovery
+
+    recovery = detect_transitions({"cpu": CRITICAL}, {"cpu": NORMAL})[0]
+    assert recovery.is_recovery and not recovery.is_escalation
+
+    partial = detect_transitions({"cpu": CRITICAL}, {"cpu": WARNING})[0]
+    assert not partial.is_escalation and not partial.is_recovery
+
+
+def test_multiple_metrics_change_in_one_cycle():
+    previous = {"cpu": NORMAL, "memory": WARNING, "disk": NORMAL}
+    current = {"cpu": WARNING, "memory": WARNING, "disk": CRITICAL}
+    result = detect_transitions(previous, current)
+    assert set((t.metric, t.current) for t in result) == {
+        ("cpu", WARNING),
+        ("disk", CRITICAL),
+    }
+
+
+def test_state_transition_is_frozen():
+    t = StateTransition("cpu", NORMAL, WARNING)
+    with pytest.raises(Exception):
+        t.metric = "memory"
