@@ -32,7 +32,7 @@ I made this project because I wanted to build something practical that uses Pyth
 system-diagnostic-report/
 ├── sysmonitor/                  # Package
 │   ├── __init__.py
-│   ├── cli.py                   # click CLI (snapshot; watch/top later)
+│   ├── cli.py                   # click CLI: snapshot / top / watch
 │   ├── collector.py            # psutil access — the only module that touches it
 │   ├── alerts.py               # pure analysis / assessment / recommendation logic
 │   ├── config.py               # YAML + pydantic config loading
@@ -79,15 +79,17 @@ pip install -e .
 
 ## 💻 Usage
 
-Take a one-shot diagnostic snapshot:
+Three subcommands, each accepting `--config PATH` (defaults to
+`config/thresholds.yaml`):
 
 ```bash
-sysmonitor snapshot
+sysmonitor snapshot            # one reading + full diagnostic report, then exit
+sysmonitor top --by cpu --n 10 # just the top-N process table
+sysmonitor watch               # poll on an interval until Ctrl+C
+sysmonitor watch --once        # a single poll cycle, then exit
 ```
 
-The command collects the current CPU, RAM, and disk usage and prints a formatted diagnostic report. (`watch` and `top` subcommands are on the way.)
-
-### Example Output
+### `snapshot` — example output
 
 ```text
 ╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
@@ -120,6 +122,32 @@ Disk      82%     ⚠ WARNING
                                                 END OF REPORT
 =======================================================================================================================
 ```
+
+### `top` — example output
+
+```text
+    PID  NAME                             CPU%     MEM%
+-------------------------------------------------------
+  15424  chrome.exe                      42.0      3.4
+  12524  Code.exe                         3.7      3.4
+   3628  MemCompression                   0.0      2.8
+```
+
+### `watch` — example output
+
+```text
+Monitoring every 5s (Ctrl+C to stop).
+2026-09-07T04:10:53Z   CPU   6.0% ✓ NORMAL   RAM  75.9% ⚠ WARNING   Disk  28.6% ✓ NORMAL
+  ⚠ WARNING  RAM at 75.9%
+2026-09-07T04:10:58Z   CPU  11.2% ✓ NORMAL   RAM  74.1% ⚠ WARNING   Disk  28.6% ✓ NORMAL
+  ⚠ WARNING  RAM at 74.1%
+^C
+Stopped monitoring.
+```
+
+> Structured file logging (`logs/sysmonitor.log`) and alert debouncing land in
+> the next phases; today `watch` prints to the console and re-reports an ongoing
+> breach every cycle.
 
 ## ⚙️ Configuration
 
@@ -168,6 +196,7 @@ pytest
 * `alerts` — `analyzer()`, `analyze_performance()`, `overall_assessment()`, `generate_recommendations()`
 * `collector` — `get_system_snapshot()`, `get_top_processes()` (with `psutil` mocked)
 * `config` — `load_config()` against valid and malformed YAML
+* `cli` — `snapshot` / `top` / `watch` via click's `CliRunner` (collector mocked)
 
 ### Test Scenarios
 
@@ -181,11 +210,13 @@ The test suite covers:
 * Collector sorting by CPU or memory, and skipping dead / permission-denied / idle processes
 * Config failure modes: missing file, broken YAML, missing field, wrong type,
   out-of-range threshold, `warning` ≥ `critical`, unknown key
+* CLI: each subcommand runs, `--config` errors print cleanly (no traceback),
+  `--n` overrides config, `watch --once` runs one cycle, Ctrl+C exits cleanly
 
 ### Current Test Result
 
 ```text
-36 passed
+44 passed
 ```
 
 ## 🛠️ Design Choices

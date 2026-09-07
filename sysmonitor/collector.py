@@ -24,18 +24,6 @@ def _disk_root() -> str:
     return os.path.abspath(os.sep)
 
 
-def get_system_stats() -> tuple[float, float, float]:
-    """Return ``(cpu_percent, ram_percent, disk_percent)`` for the whole machine.
-
-    ``cpu_percent`` blocks for one second so the reading reflects the interval
-    rather than returning 0.0 on the first call.
-    """
-    cpu_usage = psutil.cpu_percent(interval=1)
-    ram_usage = psutil.virtual_memory().percent
-    disk_usage = psutil.disk_usage(_disk_root()).percent
-    return cpu_usage, ram_usage, disk_usage
-
-
 def get_system_snapshot() -> SystemSnapshot:
     """Collect one point-in-time reading of whole-machine resource usage.
 
