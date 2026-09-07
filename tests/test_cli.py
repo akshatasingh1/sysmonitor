@@ -49,6 +49,17 @@ def runner():
     return CliRunner()
 
 
+@pytest.fixture
+def mock_top():
+    """Stub sysmonitor.cli.get_top_processes so watch never does a real scan."""
+    procs = [
+        ProcessSnapshot(pid=1, name="a.exe", cpu_percent=50.0, memory_percent=5.0),
+        ProcessSnapshot(pid=2, name="b.exe", cpu_percent=20.0, memory_percent=3.0),
+    ]
+    with patch("sysmonitor.cli.get_top_processes", return_value=procs) as m:
+        yield m
+
+
 def _snapshot(cpu=10.0, mem=40.0, disk=25.0):
     return SystemSnapshot(
         timestamp=datetime.now(timezone.utc),
@@ -152,7 +163,9 @@ def test_top_rejects_bad_by(runner, config_file):
 
 @patch("sysmonitor.cli.time.sleep")
 @patch("sysmonitor.cli.get_system_snapshot")
-def test_watch_once_logs_one_cycle_and_breach(mock_snap, mock_sleep, runner, config_file):
+def test_watch_once_logs_one_cycle_and_breach(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
     mock_snap.return_value = _snapshot(cpu=95, mem=40, disk=25)
 
     result = runner.invoke(cli, ["watch", "--once", "--config", config_file.path])
@@ -200,7 +213,9 @@ def test_watch_stops_cleanly_on_interrupt(mock_snap, runner, config_file):
 
 @patch("sysmonitor.cli.time.sleep")
 @patch("sysmonitor.cli.get_system_snapshot")
-def test_watch_debounces_ongoing_breach(mock_snap, mock_sleep, runner, config_file):
+def test_watch_debounces_ongoing_breach(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
     # three cycles all breached on CPU, then interrupt
     mock_snap.side_effect = [
         _snapshot(cpu=95, mem=20, disk=20),
@@ -215,11 +230,15 @@ def test_watch_debounces_ongoing_breach(mock_snap, mock_sleep, runner, config_fi
     events = config_file.log_events()
     assert sum(1 for e in events if e["event"] == "threshold_breach") == 1
     assert sum(1 for e in events if e["event"] == "snapshot") == 3
+    # process scan happened once - at the transition, not every sustained cycle
+    assert mock_top.call_count == 1
 
 
 @patch("sysmonitor.cli.time.sleep")
 @patch("sysmonitor.cli.get_system_snapshot")
-def test_watch_alerts_again_on_escalation_and_recovery(mock_snap, mock_sleep, runner, config_file):
+def test_watch_alerts_again_on_escalation_and_recovery(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
     mock_snap.side_effect = [
         _snapshot(cpu=75, mem=20, disk=20),   # NORMAL -> WARNING  (breach)
         _snapshot(cpu=95, mem=20, disk=20),   # WARNING -> CRITICAL (breach)
@@ -237,3 +256,76 @@ def test_watch_alerts_again_on_escalation_and_recovery(mock_snap, mock_sleep, ru
         ("threshold_cleared", "NORMAL"),
     ]
     assert events[-1]["previous_state"] == "CRITICAL"
+    # scanned on the two escalations, not on recovery
+    assert mock_top.call_count == 2
+
+
+# --- top processes on breach (Phase 6) -----------------------
+
+@patch("sysmonitor.cli.time.sleep")
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_cpu_breach_attaches_top_processes_sorted_by_cpu(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
+    mock_snap.return_value = _snapshot(cpu=95, mem=20, disk=20)
+
+    runner.invoke(cli, ["watch", "--once", "--config", config_file.path])
+
+    mock_top.assert_called_once_with(n=3, by="cpu")  # n from config.top_n_processes
+    breach = next(
+        e for e in config_file.log_events() if e["event"] == "threshold_breach"
+    )
+    assert [p["pid"] for p in breach["top_processes"]] == [1, 2]
+
+
+@patch("sysmonitor.cli.time.sleep")
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_memory_breach_sorts_top_processes_by_memory(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
+    mock_snap.return_value = _snapshot(cpu=20, mem=95, disk=20)
+
+    runner.invoke(cli, ["watch", "--once", "--config", config_file.path])
+
+    mock_top.assert_called_once_with(n=3, by="memory")
+    breach = next(
+        e for e in config_file.log_events() if e["event"] == "threshold_breach"
+    )
+    assert "top_processes" in breach
+
+
+@patch("sysmonitor.cli.time.sleep")
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_disk_breach_has_no_top_processes(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
+    mock_snap.return_value = _snapshot(cpu=20, mem=20, disk=95)
+
+    runner.invoke(cli, ["watch", "--once", "--config", config_file.path])
+
+    mock_top.assert_not_called()
+    breach = next(
+        e for e in config_file.log_events() if e["event"] == "threshold_breach"
+    )
+    assert breach["metric"] == "disk"
+    assert "top_processes" not in breach
+
+
+@patch("sysmonitor.cli.time.sleep")
+@patch("sysmonitor.cli.get_system_snapshot")
+def test_recovery_does_not_scan_processes(
+    mock_snap, mock_sleep, runner, config_file, mock_top
+):
+    mock_snap.side_effect = [
+        _snapshot(cpu=95, mem=20, disk=20),  # breach
+        _snapshot(cpu=10, mem=20, disk=20),  # recovery
+        KeyboardInterrupt(),
+    ]
+
+    runner.invoke(cli, ["watch", "--config", config_file.path])
+
+    assert mock_top.call_count == 1  # breach only, not the recovery
+    cleared = next(
+        e for e in config_file.log_events() if e["event"] == "threshold_cleared"
+    )
+    assert "top_processes" not in cleared

@@ -6,9 +6,11 @@ Three commands, all sharing a ``--config`` option:
 * ``top``      - just the top-N process table.
 * ``watch``    - poll on an interval, logging each cycle, until interrupted.
 
-``watch`` logs every cycle at INFO and every threshold breach at WARNING through
-:func:`sysmonitor.logger.get_logger`. The alert debounce (Phase 5) - only
-alerting on an OK -> breached transition - is still a TODO below.
+``watch`` logs every cycle at INFO and, debounced, every state change at
+WARNING/INFO through :func:`sysmonitor.logger.get_logger`. On a transition *into*
+a CPU or memory breach it also attaches the top-N processes (sorted by the
+breached metric) so the log says what was responsible, not just that something
+was wrong.
 """
 
 import sys
@@ -223,12 +225,25 @@ def _watch_cycle(config, logger, previous_states):
     # Debounce: only react to a metric whose state changed since last cycle,
     # not to an ongoing breach every single poll.
     for transition in detect_transitions(previous_states, states):
-        _report_transition(logger, transition, values[transition.metric])
+        _report_transition(logger, config, transition, values[transition.metric])
 
     return states
 
 
-def _report_transition(logger, transition, value):
+# psutil exposes per-process CPU and memory cheaply, but not per-process disk -
+# so a disk breach gets no "top processes" list rather than a misleading one.
+_PROCESS_SORT_BY_METRIC = {"cpu": "cpu", "memory": "memory"}
+
+
+def _top_processes_for(metric: str, count: int):
+    """Top-N processes sorted by the breached metric, or None if not applicable."""
+    sort_by = _PROCESS_SORT_BY_METRIC.get(metric)
+    if sort_by is None:
+        return None
+    return get_top_processes(n=count, by=sort_by)
+
+
+def _report_transition(logger, config, transition, value):
     metric = transition.metric
     current = _state_word(transition.current)
     previous = _state_word(transition.previous)
@@ -247,20 +262,32 @@ def _report_transition(logger, transition, value):
         click.secho(
             f"  RECOVERED  {metric} at {value:.1f}% (was {previous})", fg="green"
         )
-    else:
-        logger.warning(
-            "%s at %.1f%% is %s (was %s)" % (metric, value, current, previous),
-            extra={
-                "event": "threshold_breach",
-                "metric": metric,
-                "value": value,
-                "state": current,
-                "previous_state": previous,
-            },
-        )
-        click.secho(
-            f"  BREACH  {metric} at {value:.1f}% is {current} (was {previous})",
-            fg="red",
+        return
+
+    # Transition *into* a breach: capture what's responsible, once, now.
+    extra = {
+        "event": "threshold_breach",
+        "metric": metric,
+        "value": value,
+        "state": current,
+        "previous_state": previous,
+    }
+    top = _top_processes_for(metric, config.top_n_processes)
+    if top is not None:
+        extra["top_processes"] = [p.model_dump() for p in top]
+
+    logger.warning(
+        "%s at %.1f%% is %s (was %s)" % (metric, value, current, previous),
+        extra=extra,
+    )
+    click.secho(
+        f"  BREACH  {metric} at {value:.1f}% is {current} (was {previous})",
+        fg="red",
+    )
+    for proc in top or []:
+        click.echo(
+            f"      {proc.pid:>7}  {proc.name[:28]:<28}  "
+            f"cpu {proc.cpu_percent:5.1f}%  mem {proc.memory_percent:5.1f}%"
         )
 
 

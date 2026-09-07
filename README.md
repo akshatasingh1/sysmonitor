@@ -169,6 +169,22 @@ Every cycle still logs its `snapshot` at INFO; only the breach/recovery events
 are debounced. Breaches log `threshold_breach` at WARNING (red on the console),
 recoveries log `threshold_cleared` at INFO (green).
 
+**Top processes on breach.** On a transition *into* a CPU or memory breach — once,
+at the moment it starts, not every sustained cycle — `watch` scans the running
+processes and attaches the top *N* (`top_n_processes` from config), sorted by the
+metric that broke:
+
+```text
+  BREACH  cpu at 95.0% is CRITICAL (was NORMAL)
+        26804  python.exe                    cpu  92.6%  mem   0.2%
+         1968  dwm.exe                       cpu  10.9%  mem   0.9%
+        11472  Code.exe                      cpu  10.5%  mem   2.6%
+```
+
+The JSON record carries the same list as a `top_processes` field. A **disk**
+breach gets no process list — `psutil` has no cheap per-process disk metric, and
+a list sorted by an unrelated metric would mislead more than it helps.
+
 ## ⚙️ Configuration
 
 Runtime settings live in [`config/thresholds.yaml`](config/thresholds.yaml). A
@@ -253,11 +269,13 @@ The test suite covers:
   rotation is configured, `watch` writes `snapshot` + `threshold_breach` events
 * Debounce: no alert while a state is unchanged; re-alert on escalation;
   `threshold_cleared` on recovery; first cycle only alerts if it starts breached
+* Top-on-breach: CPU/memory breaches attach a metric-sorted `top_processes`
+  list, scanned once per transition; disk breaches and recoveries attach nothing
 
 ### Current Test Result
 
 ```text
-62 passed
+66 passed
 ```
 
 ## 🛠️ Design Choices
@@ -298,6 +316,13 @@ states) and does all the formatting. Same split as `analyze_performance`: pure
 decision in `alerts.py`, I/O and state in the loop that drives it. A tool that
 re-fires the same alert every 5 seconds is worse than useless in a real
 workflow.
+
+**Top processes only when they answer a question.** The process scan carries a
+~100 ms cost (`psutil` needs two samples for per-process CPU). Running it every
+poll would spend that on ~99% of cycles where nothing is wrong, and bloat every
+`snapshot` line with a list no one reads. So it runs only on the transition
+*into* a CPU/memory breach — the one moment "what's using it?" actually matters —
+and not again while that breach is sustained, nor on recovery.
 
 **`psutil` and Unicode status markers.** `psutil` gives cross-platform access to
 CPU / memory / disk / network from Python; `✓ ⚠ ✗` make the three states
