@@ -35,7 +35,7 @@ system-diagnostic-report/
 │   ├── cli.py                   # click CLI (snapshot; watch/top later)
 │   ├── collector.py            # psutil access — the only module that touches it
 │   ├── alerts.py               # pure analysis / assessment / recommendation logic
-│   ├── config.py               # YAML + pydantic config loading (Phase 2)
+│   ├── config.py               # YAML + pydantic config loading
 │   ├── logger.py               # structured logging setup (Phase 4)
 │   └── models.py               # pydantic data models
 ├── config/
@@ -121,6 +121,38 @@ Disk      82%     ⚠ WARNING
 =======================================================================================================================
 ```
 
+## ⚙️ Configuration
+
+Runtime settings live in [`config/thresholds.yaml`](config/thresholds.yaml). A
+committed [`config/thresholds.example.yaml`](config/thresholds.example.yaml)
+serves as the reference copy; create `config/thresholds.local.yaml` (gitignored)
+for machine-specific overrides.
+
+```yaml
+poll_interval_seconds: 5          # how often `watch` samples the system
+top_n_processes: 5                # how many processes `top` / `watch` report
+
+thresholds:                       # per-resource warning / critical cut-offs (%)
+  cpu_percent:    { warning: 70, critical: 90 }
+  memory_percent: { warning: 70, critical: 90 }
+  disk_percent:   { warning: 70, critical: 90 }
+
+logging:
+  log_file: logs/sysmonitor.log
+  format: json                    # "json" (one object per line) or "text"
+```
+
+The file is validated on load by a pydantic `AppConfig` model. Anything wrong —
+a missing field, a wrong type, a threshold outside 0–100, `warning` not below
+`critical`, or an unknown key — is reported as a single readable error rather
+than a traceback.
+
+**Missing config file:** sysmonitor fails with a clear message. It does *not*
+fall back to built-in defaults — pointing the tool at a config that isn't there
+is treated as a mistake worth stopping for. (The `analyze_performance` logic
+still carries internal 70/90 defaults, but those are a code-level fallback, not
+a substitute for the config file.)
+
 ## 🧪 Testing
 
 The project uses `pytest` to test the main functions.
@@ -131,45 +163,58 @@ Run the tests with:
 pytest
 ```
 
-### Tested Functions
+### Tested Modules
 
-* `analyze_performance()`
-* `overall_assessment()`
-* `generate_recommendations()`
+* `alerts` — `analyzer()`, `analyze_performance()`, `overall_assessment()`, `generate_recommendations()`
+* `collector` — `get_system_snapshot()`, `get_top_processes()` (with `psutil` mocked)
+* `config` — `load_config()` against valid and malformed YAML
 
 ### Test Scenarios
 
 The test suite covers:
 
-* Normal resource usage
-* Warning resource usage
-* Critical resource usage
-* Mixed resource statuses
+* Normal / warning / critical / mixed resource usage
 * Boundary values such as 69%, 70%, 89%, and 90%
+* Config-driven thresholds overriding the built-in 70/90 defaults
 * Different combinations of CPU, RAM, and disk problems
 * Recommendations for warning and critical resources
+* Collector sorting by CPU or memory, and skipping dead / permission-denied / idle processes
+* Config failure modes: missing file, broken YAML, missing field, wrong type,
+  out-of-range threshold, `warning` ≥ `critical`, unknown key
 
 ### Current Test Result
 
 ```text
-18 passed
+36 passed
 ```
 
 ## 🛠️ Design Choices
 
-I divided the program into separate functions instead of putting everything inside `main()`. This makes the code easier to understand and allows individual parts of the program to be tested independently.
+**One module owns `psutil`.** `collector.py` is the only file that imports
+`psutil`; everything downstream consumes its `SystemSnapshot` / `ProcessSnapshot`
+models. That isolation is what lets the rest of the package be unit-tested with
+`psutil` mocked, independent of the machine running the tests.
 
-The `get_system_stats()` function collects the current CPU, RAM, and disk usage. The `analyze_performance()` function then determines the status of each resource.
+**Pure analysis layer.** `analyzer()` classifies one usage value; the rest of
+`alerts.py` builds on it — `overall_assessment()` synthesises the per-resource
+statuses into one sentence, `generate_recommendations()` produces advice for
+anything in a warning or critical state. None of these do I/O, so they're
+trivial to test at the boundaries.
 
-The `overall_assessment()` function looks at the resource statuses and identifies the main performance problems. The `generate_recommendations()` function creates recommendations for resources that are in a warning or critical state.
+**Two-tier thresholds, config-driven.** Each resource has a `warning` and a
+`critical` cut-off (default 70 / 90), loaded from YAML and validated by pydantic.
+This mirrors how real monitoring tools (Prometheus, Nagios) model severity, and
+it keeps a judgment layer — "is this actually a problem, and how bad?" — on top
+of the raw numbers rather than emitting a flat "over threshold" message.
 
-Finally, `display_report()` presents the results in a formatted terminal report.
+**Fail loud on bad config.** A missing file, an out-of-range value, or
+`warning ≥ critical` stops the program with a readable message instead of a
+traceback or a silent fallback. "What's the failure mode?" should have a
+deliberate answer.
 
-I chose 70% and 90% as the thresholds for the three resource states. Usage below 70% is considered normal, usage from 70% to 89% is considered a warning, and usage of 90% or higher is considered critical.
-
-I used `psutil` because it provides a straightforward way to access system information such as CPU, memory, and disk usage from Python.
-
-I also used Unicode symbols such as `✓`, `⚠`, and `✗` to make the different resource states easier to identify in the terminal.
+**`psutil` and Unicode status markers.** `psutil` gives cross-platform access to
+CPU / memory / disk / network from Python; `✓ ⚠ ✗` make the three states
+scannable in a terminal.
 
 ## 📄 Requirements
 

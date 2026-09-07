@@ -1,8 +1,10 @@
 from sysmonitor.alerts import (
     analyze_performance,
+    analyzer,
     generate_recommendations,
     overall_assessment,
 )
+from sysmonitor.models import Thresholds
 
 
 # ============================================================
@@ -52,6 +54,37 @@ def test_analyze_performance_boundary_values():
     assert cpu_performance == "✗ CRITICAL"
     assert ram_performance == "✗ CRITICAL"
     assert disk_performance == "✗ CRITICAL"
+
+
+# ============================================================
+# TESTS FOR config-driven thresholds
+# ============================================================
+
+def test_analyzer_uses_custom_cutoffs():
+    assert analyzer(45, warning=40, critical=60) == "⚠ WARNING"
+    assert analyzer(35, warning=40, critical=60) == "✓ NORMAL"
+    assert analyzer(65, warning=40, critical=60) == "✗ CRITICAL"
+
+
+def test_analyze_performance_applies_per_resource_thresholds():
+    thresholds = Thresholds(
+        cpu_percent={"warning": 50, "critical": 80},
+        memory_percent={"warning": 60, "critical": 85},
+        disk_percent={"warning": 70, "critical": 90},
+    )
+
+    cpu_performance, ram_performance, disk_performance = analyze_performance(
+        55, 55, 55, thresholds=thresholds
+    )
+
+    assert cpu_performance == "⚠ WARNING"   # 55 >= cpu warning 50
+    assert ram_performance == "✓ NORMAL"    # 55 < memory warning 60
+    assert disk_performance == "✓ NORMAL"   # 55 < disk warning 70
+
+
+def test_analyze_performance_without_thresholds_uses_defaults():
+    # No behaviour change from the original hardcoded 70 / 90.
+    assert analyze_performance(75, 60, 95) == ("⚠ WARNING", "✓ NORMAL", "✗ CRITICAL")
 
 
 # ============================================================

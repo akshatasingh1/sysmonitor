@@ -9,20 +9,36 @@ WARNING = "⚠ WARNING"
 CRITICAL = "✗ CRITICAL"
 
 
-def analyze_performance(cpu_usage, ram_usage, disk_usage):
-    """Classify each raw usage percentage into a status string."""
-    cpu_performance = analyzer(cpu_usage)
-    ram_performance = analyzer(ram_usage)
-    disk_performance = analyzer(disk_usage)
-
-    return cpu_performance, ram_performance, disk_performance
+# Fallback cut-offs used when no config-driven thresholds are supplied. These
+# match the original hardcoded values, so callers that don't pass thresholds
+# (and the tests that pin this behaviour) keep working unchanged.
+DEFAULT_WARNING = 70
+DEFAULT_CRITICAL = 90
 
 
-def analyzer(usage):
-    """Map a usage percentage to NORMAL (<70), WARNING (<90) or CRITICAL."""
-    if usage < 70:
+def analyze_performance(cpu_usage, ram_usage, disk_usage, thresholds=None):
+    """Classify each raw usage percentage into a status string.
+
+    ``thresholds`` is an optional object with ``cpu_percent`` / ``memory_percent``
+    / ``disk_percent`` attributes, each exposing ``warning`` and ``critical``
+    (i.e. a :class:`sysmonitor.models.Thresholds`). When omitted, the default
+    70 / 90 cut-offs apply to every resource.
+    """
+    if thresholds is None:
+        return analyzer(cpu_usage), analyzer(ram_usage), analyzer(disk_usage)
+
+    return (
+        analyzer(cpu_usage, thresholds.cpu_percent.warning, thresholds.cpu_percent.critical),
+        analyzer(ram_usage, thresholds.memory_percent.warning, thresholds.memory_percent.critical),
+        analyzer(disk_usage, thresholds.disk_percent.warning, thresholds.disk_percent.critical),
+    )
+
+
+def analyzer(usage, warning=DEFAULT_WARNING, critical=DEFAULT_CRITICAL):
+    """Map a usage percentage to NORMAL (< warning), WARNING (< critical) or CRITICAL."""
+    if usage < warning:
         return NORMAL
-    elif usage < 90:
+    elif usage < critical:
         return WARNING
     else:
         return CRITICAL

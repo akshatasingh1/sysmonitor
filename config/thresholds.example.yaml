@@ -5,9 +5,9 @@ poll_interval_seconds: 5
 top_n_processes: 5
 
 thresholds:
-  cpu_percent: 80
-  memory_percent: 85
-  disk_percent: 90
+  cpu_percent:    { warning: 70, critical: 90 }
+  memory_percent: { warning: 70, critical: 90 }
+  disk_percent:   { warning: 70, critical: 90 }
 
 logging:
   log_file: logs/sysmonitor.log
